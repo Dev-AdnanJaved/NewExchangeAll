@@ -1,0 +1,68 @@
+{
+  "exchanges": {
+    "binance": {
+      "enabled": true,
+      "api_key": "",
+      "api_secret": ""
+    },
+    "bybit": {
+      "enabled": true,
+      "api_key": "",
+      "api_secret": ""
+    },
+    "okx": {
+      "enabled": false,
+      "api_key": "",
+      "api_secret": "",
+      "passphrase": ""
+    },
+    "bitget": {
+      "enabled": false,
+      "api_key": "",
+      "api_secret": "",
+      "passphrase": ""
+    },
+    "gate": {
+      "enabled": false,
+      "api_key": "",
+      "api_secret": ""
+    },
+    "mexc": {
+      "enabled": false,
+      "api_key": "",
+      "api_secret": ""
+    }
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "chat_id": ""
+  },
+  "scanning": {
+    "scan_interval_minutes": 15,
+    "trade_monitor_interval_minutes": 5,
+    "min_futures_exchanges": 1,
+    "alert_score_threshold": 48,
+    "critical_score_threshold": 78,
+    "high_alert_threshold": 62,
+    "watchlist_threshold": 48,
+    "max_tokens_per_scan": 400,
+    "ohlcv_candle_limit": 500,
+    "orderbook_depth": 50
+  },
+  "trading": {
+    "default_stop_loss_pct": 7.0,
+    "max_concurrent_trades": 5,
+    "max_risk_per_trade_pct": 2.0
+  },
+  "database": {
+    "path": "data/pump_detector.db",
+    "cleanup_days": 30
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/pump_detector.log",
+    "max_size_mb": 50,
+    "backup_count": 3
+  }
+}

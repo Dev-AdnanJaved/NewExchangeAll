@@ -1,0 +1,72 @@
+2026-02-19 22:09:43 | INFO     | database             | Database initialized: data/pump_detector.db
+2026-02-19 22:09:43 | INFO     | universe             | Exchange initialized: binance
+2026-02-19 22:09:43 | INFO     | universe             | Exchange initialized: bybit
+2026-02-19 22:09:43 | INFO     | universe             | Exchange initialized: okx
+2026-02-19 22:09:43 | INFO     | universe             | Exchange initialized: bitget
+2026-02-19 22:09:43 | INFO     | universe             | Exchange initialized: mexc
+2026-02-19 22:09:43 | INFO     | scanner              | Continuous mode started
+2026-02-19 22:09:43 | INFO     | scanner              | ============================================================
+2026-02-19 22:09:43 | INFO     | scanner              | STARTING SCAN
+2026-02-19 22:09:43 | INFO     | scanner              | ============================================================
+2026-02-19 22:09:43 | INFO     | universe             | Building token universe...
+2026-02-19 22:09:43 | INFO     | universe             | Loading markets from binance...
+2026-02-19 22:09:46 | ERROR    | universe             | Error loading binance: binance {"code":-1021,"msg":"Timestamp for this request is outside of the recvWindow."}
+2026-02-19 22:09:46 | INFO     | universe             | Loading markets from bybit...
+2026-02-19 22:09:47 | ERROR    | universe             | Error loading bybit: bybit {"retCode":10002,"retMsg":"invalid request, please check your server timestamp or recv_window param: req_timestamp[1771520986614],server_timestamp[1771520996417],recv_window[5000]","result":{},"retExtInfo":{},"time":1771520996417}
+2026-02-19 22:09:47 | INFO     | universe             | Loading markets from okx...
+2026-02-19 22:09:48 | ERROR    | universe             | Error loading okx: okx GET https://www.okx.com/api/v5/asset/currencies
+2026-02-19 22:09:48 | INFO     | universe             | Loading markets from bitget...
+2026-02-19 22:09:55 | INFO     | universe             | bitget: 534 futures
+2026-02-19 22:09:56 | INFO     | universe             | Loading markets from mexc...
+2026-02-19 22:10:53 | WARNING  | telegram             | python-telegram-bot not installed
+2026-02-19 22:11:06 | INFO     | database             | Database initialized: data/pump_detector.db
+2026-02-19 22:11:06 | INFO     | universe             | Exchange initialized: binance
+2026-02-19 22:11:06 | INFO     | universe             | Exchange initialized: bybit
+2026-02-19 22:11:06 | INFO     | universe             | Exchange initialized: okx
+2026-02-19 22:11:06 | INFO     | universe             | Exchange initialized: bitget
+2026-02-19 22:11:06 | INFO     | universe             | Exchange initialized: mexc
+2026-02-19 22:11:06 | INFO     | scanner              | Continuous mode started
+2026-02-19 22:11:06 | INFO     | scanner              | ============================================================
+2026-02-19 22:11:06 | INFO     | scanner              | STARTING SCAN
+2026-02-19 22:11:06 | INFO     | scanner              | ============================================================
+2026-02-19 22:11:06 | INFO     | universe             | Building token universe...
+2026-02-19 22:11:06 | INFO     | universe             | Loading markets from binance...
+2026-02-19 22:11:14 | INFO     | universe             | binance: 552 futures
+2026-02-19 22:11:15 | INFO     | universe             | Loading markets from bybit...
+2026-02-19 22:11:25 | ERROR    | universe             | Error loading bybit: bybit {"retCode":10002,"retMsg":"invalid request, please check your server timestamp or recv_window param: req_timestamp[1771521075313],server_timestamp[1771521084954],recv_window[5000]","result":{},"retExtInfo":{},"time":1771521084954}
+2026-02-19 22:11:25 | INFO     | universe             | Loading markets from okx...
+2026-02-19 22:11:37 | ERROR    | universe             | Error loading okx: okx GET https://www.okx.com/api/v5/asset/currencies
+2026-02-19 22:11:37 | INFO     | universe             | Loading markets from bitget...
+2026-02-19 22:12:02 | INFO     | universe             | bitget: 534 futures
+2026-02-19 22:12:03 | INFO     | universe             | Loading markets from mexc...
+2026-02-19 22:12:47 | ERROR    | universe             | Error loading mexc: mexc GET https://api.mexc.com/api/v3/capital/config/getall?timestamp=1771521123281&recvWindow=5000&signature=e36c71b86cd96f6eb6a9bdf61abe66e51ec6e59c0049d9692e4b067b703348b2
+2026-02-19 22:12:47 | INFO     | universe             | Universe: 612 tokens with futures on 1+ exchanges
+2026-02-19 22:12:47 | INFO     | scanner              | Universe: 400 tokens
+2026-02-19 22:12:47 | INFO     | scanner              | Bootstrapping 400 tokens...
+2026-02-19 22:12:47 | INFO     | collector            |   ⏳ Bootstrapping BTC...
+2026-02-19 22:12:48 | INFO     | collector            |     OI history BTC/binance: 'binance' object has no attribute 'fapiPublicGetOpenInterestHist'
+2026-02-19 22:12:48 | INFO     | collector            |     binance: 100 funding points
+2026-02-19 22:12:49 | INFO     | collector            |     binance: 100 L/S points
+2026-02-19 22:12:50 | INFO     | collector            |     binance: 500 ticker snapshots
+2026-02-19 22:12:53 | INFO     | collector            |     bitget: 500 ticker snapshots
+2026-02-19 22:12:54 | INFO     | collector            |   ✅ Bootstrap done: BTC
+2026-02-19 22:12:54 | INFO     | collector            |   ⏳ Bootstrapping ETH...
+2026-02-19 22:12:55 | INFO     | collector            |     OI history ETH/binance: 'binance' object has no attribute 'fapiPublicGetOpenInterestHist'
+2026-02-19 22:13:24 | INFO     | collector            |     Funding history ETH/binance: binance GET https://fapi.binance.com/fapi/v1/fundingRate?symbol=ETHUSDT&limit=100
+2026-02-19 22:13:37 | INFO     | collector            |     binance: 100 L/S points
+2026-02-19 22:13:48 | INFO     | collector            |     binance: 500 ticker snapshots
+2026-02-19 22:14:00 | INFO     | collector            |     bitget: 500 ticker snapshots
+2026-02-19 22:14:01 | INFO     | collector            |   ✅ Bootstrap done: ETH
+2026-02-19 22:14:01 | INFO     | collector            |   ⏳ Bootstrapping BCH...
+2026-02-19 22:14:01 | INFO     | collector            |     OI history BCH/binance: 'binance' object has no attribute 'fapiPublicGetOpenInterestHist'
+2026-02-19 22:14:04 | INFO     | collector            |     binance: 100 funding points
+2026-02-19 22:14:08 | INFO     | collector            |     binance: 100 L/S points
+2026-02-19 22:14:09 | INFO     | collector            |     binance: 500 ticker snapshots
+2026-02-19 22:14:11 | INFO     | collector            |     bitget: 500 ticker snapshots
+2026-02-19 22:14:11 | INFO     | collector            |   ✅ Bootstrap done: BCH
+2026-02-19 22:14:12 | INFO     | collector            |   ⏳ Bootstrapping XRP...
+2026-02-19 22:14:15 | INFO     | collector            |     OI history XRP/binance: 'binance' object has no attribute 'fapiPublicGetOpenInterestHist'
+2026-02-19 22:14:18 | INFO     | collector            |     binance: 100 funding points
+2026-02-19 22:14:19 | INFO     | collector            |     binance: 100 L/S points
+2026-02-19 22:14:19 | INFO     | collector            |     binance: 500 ticker snapshots
+2026-02-19 22:14:21 | INFO     | scanner              | Stopped
