@@ -178,20 +178,24 @@ class DataCollector:
 
     # ─── Bootstrap: OI history ────────────────────────────────
 
+ 
+
     def _fetch_oi_history(self, exchange, ex_name, symbol, pair, price):
-        """Use the CCXT *unified* fetch_open_interest_history().
-        Works on binance, bybit, bitget, okx — any exchange that
-        implements the method, regardless of ccxt version."""
+        """
+        Unified first, then exchange-specific fallbacks for
+        exchanges where the unified method is not yet supported.
+        """
         results = []
+
+        # ── Try unified method first ─────────────────────────
         try:
             data = exchange.fetch_open_interest_history(
                 pair, timeframe="1h", limit=BOOTSTRAP_OI_PERIODS
             )
             for item in data:
                 ts = item.get("timestamp", 0)
-                if ts > 1e12:          # ms → s
+                if ts > 1e12:
                     ts /= 1000
-                # prefer USD-denominated value
                 oi = item.get("openInterestValue") or 0
                 if not oi:
                     amt = item.get("openInterestAmount", 0)
@@ -201,8 +205,106 @@ class DataCollector:
                         "timestamp": ts,
                         "open_interest": float(oi),
                     })
+            if results:
+                return results
         except Exception as e:
-            logger.info(f"    OI history {symbol}/{ex_name}: {e}")
+            logger.debug(f"    OI unified {symbol}/{ex_name}: {e}")
+
+        # ── Bitget fallback (v2 REST API) ────────────────────
+        if ex_name == "bitget":
+            try:
+                resp = self._call_api(
+                    exchange,
+                    [
+                        # v2 API — try both ccxt v3 and v4 naming
+                        "publicMixGetV2MixMarketOpenInterestHistory",
+                        "public_mix_get_v2_mix_market_open_interest_history",
+                        # v1 API fallback
+                        "publicMixGetMixV1MarketOpenInterestHistory",
+                        "public_mix_get_mix_v1_market_open_interest_history",
+                    ],
+                    {
+                        "symbol": f"{symbol}USDT",
+                        "productType": "USDT-FUTURES",
+                        "period": "1h",
+                        "limit": str(BOOTSTRAP_OI_PERIODS),
+                    },
+                )
+                data_list = []
+                if isinstance(resp, dict):
+                    data_list = resp.get("data", {})
+                    if isinstance(data_list, dict):
+                        data_list = data_list.get("list", [])
+                elif isinstance(resp, list):
+                    data_list = resp
+
+                for item in data_list:
+                    ts = int(item.get("ts", item.get("timestamp", 0)))
+                    if ts > 1e12:
+                        ts /= 1000
+                    # bitget may return base-unit OI → multiply by price
+                    oi = float(item.get("openInterestValue",
+                               item.get("openInterest", 0)))
+                    if oi > 0 and oi < 1e6 and price:
+                        # heuristic: if value looks like base units, convert
+                        oi = oi * price
+                    if oi > 0 and ts > 0:
+                        results.append({
+                            "timestamp": ts,
+                            "open_interest": oi,
+                        })
+                if results:
+                    return results
+            except Exception as e:
+                logger.debug(f"    OI bitget-api {symbol}: {e}")
+
+            # ── Last resort: build from current snapshots ────
+            try:
+                oi_data = exchange.fetch_open_interest(pair)
+                if oi_data:
+                    v = oi_data.get("openInterestValue") or 0
+                    if not v:
+                        amt = oi_data.get("openInterestAmount", 0)
+                        v = float(amt) * price if amt and price else 0
+                    if float(v) > 0:
+                        results.append({
+                            "timestamp": time.time(),
+                            "open_interest": float(v),
+                        })
+            except Exception as e:
+                logger.debug(f"    OI bitget-single {symbol}: {e}")
+
+        # ── Bybit fallback ───────────────────────────────────
+        elif ex_name == "bybit":
+            try:
+                resp = self._call_api(
+                    exchange,
+                    [
+                        "publicGetV5MarketOpenInterest",
+                        "public_get_v5_market_open_interest",
+                    ],
+                    {
+                        "category": "linear",
+                        "symbol": f"{symbol}USDT",
+                        "intervalTime": "1h",
+                        "limit": BOOTSTRAP_OI_PERIODS,
+                    },
+                )
+                if resp and resp.get("result", {}).get("list"):
+                    for item in resp["result"]["list"]:
+                        ts = int(item.get("timestamp", 0)) / 1000
+                        oi_base = float(item.get("openInterest", 0))
+                        oi = oi_base * price if price else oi_base
+                        if oi > 0 and ts > 0:
+                            results.append({
+                                "timestamp": ts,
+                                "open_interest": oi,
+                            })
+            except Exception as e:
+                logger.debug(f"    OI bybit-api {symbol}: {e}")
+
+        if not results:
+            logger.info(f"    OI history {symbol}/{ex_name}: no data")
         return results
 
     # ─── Bootstrap: Funding history ──────────────────────────
