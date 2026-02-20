@@ -1,5 +1,6 @@
 """
 Exchange data collection + bootstrap historical data.
+Uses CCXT unified methods for maximum compatibility across versions.
 """
 
 import json
@@ -34,7 +35,51 @@ class DataCollector:
         self.orderbook_depth = config.get("scanning", {}).get("orderbook_depth", 50)
 
     # ═══════════════════════════════════════════════════════════
-    # BOOTSTRAP
+    #  HELPERS
+    # ═══════════════════════════════════════════════════════════
+
+    def _make_pair(self, symbol, exchange_name):
+        exchange = self.exchanges.get(exchange_name)
+        if not exchange:
+            return None
+        candidates = [f"{symbol}/USDT:USDT", f"{symbol}/USDT"]
+        if hasattr(exchange, "markets") and exchange.markets:
+            for c in candidates:
+                if c in exchange.markets:
+                    return c
+        return candidates[0]
+
+    def _quick_price(self, exchange, pair):
+        try:
+            t = exchange.fetch_ticker(pair)
+            if t and t.get("last"):
+                return float(t["last"])
+        except Exception:
+            pass
+        return 0
+
+    def _call_api(self, exchange, method_names, params):
+        """
+        Try multiple implicit-API method names so the same code
+        works on ccxt v3 (camelCase) and v4 (underscore) naming.
+        Returns the response from the first method that exists and succeeds.
+        """
+        last_err = None
+        for name in method_names:
+            fn = getattr(exchange, name, None)
+            if fn is not None:
+                try:
+                    return fn(params)
+                except Exception as e:
+                    last_err = e
+        if last_err:
+            raise last_err
+        raise AttributeError(
+            f"Exchange has none of these methods: {method_names}"
+        )
+
+    # ═══════════════════════════════════════════════════════════
+    #  BOOTSTRAP
     # ═══════════════════════════════════════════════════════════
 
     def needs_bootstrap(self, symbol):
@@ -56,40 +101,50 @@ class DataCollector:
                 continue
             current_price = self._quick_price(exchange, pair)
 
-            # Historical OI
-            oi_hist = self._fetch_oi_history(exchange, ex_name, symbol, current_price)
+            # ── Historical OI (unified) ──────────────────────
+            oi_hist = self._fetch_oi_history(
+                exchange, ex_name, symbol, pair, current_price
+            )
             if oi_hist:
                 rows = [
-                    (p["timestamp"], symbol, ex_name, "open_interest",
-                     json.dumps({"open_interest": p["open_interest"]}))
+                    (
+                        p["timestamp"], symbol, ex_name, "open_interest",
+                        json.dumps({"open_interest": p["open_interest"]}),
+                    )
                     for p in oi_hist
                 ]
                 self.db.store_snapshots_batch(rows)
                 logger.info(f"    {ex_name}: {len(rows)} OI points")
 
-            # Historical Funding
-            fund_hist = self._fetch_funding_history(exchange, ex_name, symbol)
+            # ── Historical Funding (unified) ─────────────────
+            fund_hist = self._fetch_funding_history(
+                exchange, ex_name, symbol, pair
+            )
             if fund_hist:
                 rows = [
-                    (p["timestamp"], symbol, ex_name, "funding_rate",
-                     json.dumps({"funding_rate": p["funding_rate"]}))
+                    (
+                        p["timestamp"], symbol, ex_name, "funding_rate",
+                        json.dumps({"funding_rate": p["funding_rate"]}),
+                    )
                     for p in fund_hist
                 ]
                 self.db.store_snapshots_batch(rows)
                 logger.info(f"    {ex_name}: {len(rows)} funding points")
 
-            # Historical L/S Ratio
+            # ── Historical L/S Ratio (exchange-specific) ─────
             ls_hist = self._fetch_ls_history(exchange, ex_name, symbol)
             if ls_hist:
                 rows = [
-                    (p["timestamp"], symbol, ex_name, "long_short_ratio",
-                     json.dumps({"long_short_ratio": p["long_short_ratio"]}))
+                    (
+                        p["timestamp"], symbol, ex_name, "long_short_ratio",
+                        json.dumps({"long_short_ratio": p["long_short_ratio"]}),
+                    )
                     for p in ls_hist
                 ]
                 self.db.store_snapshots_batch(rows)
                 logger.info(f"    {ex_name}: {len(rows)} L/S points")
 
-            # OHLCV + synthetic tickers
+            # ── OHLCV + synthetic tickers ────────────────────
             try:
                 ohlcv = exchange.fetch_ohlcv(
                     pair, timeframe="1h", limit=BOOTSTRAP_OHLCV_CANDLES
@@ -99,15 +154,21 @@ class DataCollector:
                     for c in ohlcv:
                         ts = c[0] / 1000
                         td = {
-                            "last": c[4], "high": c[2], "low": c[3],
+                            "last": c[4],
+                            "high": c[2],
+                            "low": c[3],
                             "volume": c[5],
-                            "quoteVolume": c[5] * c[4] if c[5] and c[4] else 0,
+                            "quoteVolume": (
+                                c[5] * c[4] if c[5] and c[4] else 0
+                            ),
                         }
                         ticker_rows.append(
                             (ts, symbol, ex_name, "ticker", json.dumps(td))
                         )
                     self.db.store_snapshots_batch(ticker_rows)
-                    logger.info(f"    {ex_name}: {len(ticker_rows)} ticker snapshots")
+                    logger.info(
+                        f"    {ex_name}: {len(ticker_rows)} ticker snapshots"
+                    )
             except Exception as e:
                 logger.warning(f"    {ex_name}: OHLCV bootstrap fail: {e}")
 
@@ -115,89 +176,100 @@ class DataCollector:
 
         logger.info(f"  ✅ Bootstrap done: {symbol}")
 
-    def _fetch_oi_history(self, exchange, ex_name, symbol, price):
+    # ─── Bootstrap: OI history ────────────────────────────────
+
+    def _fetch_oi_history(self, exchange, ex_name, symbol, pair, price):
+        """Use the CCXT *unified* fetch_open_interest_history().
+        Works on binance, bybit, bitget, okx — any exchange that
+        implements the method, regardless of ccxt version."""
         results = []
         try:
-            if ex_name == "binance":
-                resp = exchange.fapiPublicGetOpenInterestHist({
-                    "symbol": f"{symbol}USDT", "period": "1h",
-                    "limit": BOOTSTRAP_OI_PERIODS,
-                })
-                if resp:
-                    for item in resp:
-                        ts = int(item.get("timestamp", 0)) / 1000
-                        oi = float(item.get("sumOpenInterestValue", 0))
-                        if oi > 0 and ts > 0:
-                            results.append({"timestamp": ts, "open_interest": oi})
-
-            elif ex_name == "bybit":
-                resp = exchange.publicGetV5MarketOpenInterest({
-                    "category": "linear", "symbol": f"{symbol}USDT",
-                    "intervalTime": "1h", "limit": BOOTSTRAP_OI_PERIODS,
-                })
-                if resp and resp.get("result", {}).get("list"):
-                    for item in resp["result"]["list"]:
-                        ts = int(item.get("timestamp", 0)) / 1000
-                        oi_base = float(item.get("openInterest", 0))
-                        oi = oi_base * price if price else oi_base
-                        if oi > 0 and ts > 0:
-                            results.append({"timestamp": ts, "open_interest": oi})
-
+            data = exchange.fetch_open_interest_history(
+                pair, timeframe="1h", limit=BOOTSTRAP_OI_PERIODS
+            )
+            for item in data:
+                ts = item.get("timestamp", 0)
+                if ts > 1e12:          # ms → s
+                    ts /= 1000
+                # prefer USD-denominated value
+                oi = item.get("openInterestValue") or 0
+                if not oi:
+                    amt = item.get("openInterestAmount", 0)
+                    oi = float(amt) * price if amt and price else 0
+                if float(oi) > 0 and ts > 0:
+                    results.append({
+                        "timestamp": ts,
+                        "open_interest": float(oi),
+                    })
         except Exception as e:
             logger.info(f"    OI history {symbol}/{ex_name}: {e}")
         return results
 
-    def _fetch_funding_history(self, exchange, ex_name, symbol):
+    # ─── Bootstrap: Funding history ──────────────────────────
+
+    def _fetch_funding_history(self, exchange, ex_name, symbol, pair):
+        """Use the CCXT *unified* fetch_funding_rate_history()."""
         results = []
         try:
-            if ex_name == "binance":
-                resp = exchange.fapiPublicGetFundingRate({
-                    "symbol": f"{symbol}USDT",
-                    "limit": BOOTSTRAP_FUNDING_PERIODS,
-                })
-                if resp:
-                    for item in resp:
-                        ts = int(item.get("fundingTime", 0)) / 1000
-                        rate = float(item.get("fundingRate", 0))
-                        if ts > 0:
-                            results.append({"timestamp": ts, "funding_rate": rate})
-
-            elif ex_name == "bybit":
-                resp = exchange.publicGetV5MarketFundingHistory({
-                    "category": "linear", "symbol": f"{symbol}USDT",
-                    "limit": BOOTSTRAP_FUNDING_PERIODS,
-                })
-                if resp and resp.get("result", {}).get("list"):
-                    for item in resp["result"]["list"]:
-                        ts = int(item.get("fundingRateTimestamp", 0)) / 1000
-                        rate = float(item.get("fundingRate", 0))
-                        if ts > 0:
-                            results.append({"timestamp": ts, "funding_rate": rate})
-
+            data = exchange.fetch_funding_rate_history(
+                pair, limit=BOOTSTRAP_FUNDING_PERIODS
+            )
+            for item in data:
+                ts = item.get("timestamp", 0)
+                if ts > 1e12:
+                    ts /= 1000
+                rate = item.get("fundingRate")
+                if ts > 0 and rate is not None:
+                    results.append({
+                        "timestamp": ts,
+                        "funding_rate": float(rate),
+                    })
         except Exception as e:
             logger.info(f"    Funding history {symbol}/{ex_name}: {e}")
         return results
+
+    # ─── Bootstrap: L/S ratio history (no unified method) ────
 
     def _fetch_ls_history(self, exchange, ex_name, symbol):
         results = []
         try:
             if ex_name == "binance":
-                resp = exchange.fapiDataGetGlobalLongShortAccountRatio({
-                    "symbol": f"{symbol}USDT", "period": "1h",
-                    "limit": BOOTSTRAP_LS_PERIODS,
-                })
+                resp = self._call_api(
+                    exchange,
+                    [
+                        "fapiDataGetGlobalLongShortAccountRatio",
+                        "fapiData_get_globalLongShortAccountRatio",
+                    ],
+                    {
+                        "symbol": f"{symbol}USDT",
+                        "period": "1h",
+                        "limit": BOOTSTRAP_LS_PERIODS,
+                    },
+                )
                 if resp:
                     for item in resp:
                         ts = int(item.get("timestamp", 0)) / 1000
                         ratio = float(item.get("longShortRatio", 1.0))
                         if ts > 0:
-                            results.append({"timestamp": ts, "long_short_ratio": ratio})
+                            results.append({
+                                "timestamp": ts,
+                                "long_short_ratio": ratio,
+                            })
 
             elif ex_name == "bybit":
-                resp = exchange.publicGetV5MarketAccountRatio({
-                    "category": "linear", "symbol": f"{symbol}USDT",
-                    "period": "1h", "limit": BOOTSTRAP_LS_PERIODS,
-                })
+                resp = self._call_api(
+                    exchange,
+                    [
+                        "publicGetV5MarketAccountRatio",
+                        "public_get_v5_market_account_ratio",
+                    ],
+                    {
+                        "category": "linear",
+                        "symbol": f"{symbol}USDT",
+                        "period": "1h",
+                        "limit": BOOTSTRAP_LS_PERIODS,
+                    },
+                )
                 if resp and resp.get("result", {}).get("list"):
                     for item in resp["result"]["list"]:
                         ts = int(item.get("timestamp", 0)) / 1000
@@ -206,7 +278,9 @@ class DataCollector:
                         if ts > 0:
                             results.append({
                                 "timestamp": ts,
-                                "long_short_ratio": safe_divide(buy, sell, 1.0),
+                                "long_short_ratio": safe_divide(
+                                    buy, sell, 1.0
+                                ),
                             })
 
         except Exception as e:
@@ -214,15 +288,20 @@ class DataCollector:
         return results
 
     # ═══════════════════════════════════════════════════════════
-    # REGULAR COLLECTION
+    #  REGULAR COLLECTION
     # ═══════════════════════════════════════════════════════════
 
     def collect_all(self, symbol, futures_exchanges):
         ts = time.time()
         result = {
-            "symbol": symbol, "timestamp": ts,
-            "ohlcv": {}, "tickers": {}, "open_interest": {},
-            "funding_rates": {}, "orderbooks": {}, "long_short_ratios": {},
+            "symbol": symbol,
+            "timestamp": ts,
+            "ohlcv": {},
+            "tickers": {},
+            "open_interest": {},
+            "funding_rates": {},
+            "orderbooks": {},
+            "long_short_ratios": {},
         }
         snapshot_rows = []
 
@@ -236,12 +315,16 @@ class DataCollector:
 
             # OHLCV
             try:
-                ohlcv = exchange.fetch_ohlcv(pair, timeframe="1h", limit=self.candle_limit)
+                ohlcv = exchange.fetch_ohlcv(
+                    pair, timeframe="1h", limit=self.candle_limit
+                )
                 if ohlcv and len(ohlcv) > 0:
                     result["ohlcv"][ex_name] = ohlcv
                     snapshot_rows.append(
-                        (ts, symbol, ex_name, "ohlcv",
-                         json.dumps({"candles": ohlcv[-72:]}))
+                        (
+                            ts, symbol, ex_name, "ohlcv",
+                            json.dumps({"candles": ohlcv[-72:]}),
+                        )
                     )
             except Exception as e:
                 logger.info(f"OHLCV fail {symbol}/{ex_name}: {e}")
@@ -267,37 +350,45 @@ class DataCollector:
             except Exception as e:
                 logger.info(f"Ticker fail {symbol}/{ex_name}: {e}")
 
-            # Open Interest
+            # Open Interest (unified)
             try:
                 oi = self._fetch_open_interest(exchange, ex_name, pair, symbol)
                 if oi and oi > 0:
                     result["open_interest"][ex_name] = oi
                     snapshot_rows.append(
-                        (ts, symbol, ex_name, "open_interest",
-                         json.dumps({"open_interest": oi}))
+                        (
+                            ts, symbol, ex_name, "open_interest",
+                            json.dumps({"open_interest": oi}),
+                        )
                     )
             except Exception as e:
                 logger.info(f"OI fail {symbol}/{ex_name}: {e}")
 
-            # Funding Rate
+            # Funding Rate (unified)
             try:
-                funding = self._fetch_funding_rate(exchange, ex_name, pair, symbol)
+                funding = self._fetch_funding_rate(
+                    exchange, ex_name, pair, symbol
+                )
                 if funding is not None:
                     result["funding_rates"][ex_name] = funding
                     snapshot_rows.append(
-                        (ts, symbol, ex_name, "funding_rate",
-                         json.dumps({"funding_rate": funding}))
+                        (
+                            ts, symbol, ex_name, "funding_rate",
+                            json.dumps({"funding_rate": funding}),
+                        )
                     )
             except Exception as e:
                 logger.info(f"Funding fail {symbol}/{ex_name}: {e}")
 
             # Order Book
             try:
-                ob = exchange.fetch_order_book(pair, limit=self.orderbook_depth)
+                ob = exchange.fetch_order_book(
+                    pair, limit=self.orderbook_depth
+                )
                 if ob and ob.get("bids") and ob.get("asks"):
                     obd = {
-                        "bids": ob["bids"][:self.orderbook_depth],
-                        "asks": ob["asks"][:self.orderbook_depth],
+                        "bids": ob["bids"][: self.orderbook_depth],
+                        "asks": ob["asks"][: self.orderbook_depth],
                     }
                     result["orderbooks"][ex_name] = obd
                     snapshot_rows.append(
@@ -308,12 +399,16 @@ class DataCollector:
 
             # Long/Short Ratio
             try:
-                ls = self._fetch_long_short_ratio(exchange, ex_name, pair, symbol)
+                ls = self._fetch_long_short_ratio(
+                    exchange, ex_name, pair, symbol
+                )
                 if ls is not None:
                     result["long_short_ratios"][ex_name] = ls
                     snapshot_rows.append(
-                        (ts, symbol, ex_name, "long_short_ratio",
-                         json.dumps({"long_short_ratio": ls}))
+                        (
+                            ts, symbol, ex_name, "long_short_ratio",
+                            json.dumps({"long_short_ratio": ls}),
+                        )
                     )
             except Exception as e:
                 logger.info(f"L/S fail {symbol}/{ex_name}: {e}")
@@ -323,101 +418,149 @@ class DataCollector:
 
         return result
 
-    # ═══════════════════════════════════════════════════════════
-    # HELPERS
-    # ═══════════════════════════════════════════════════════════
-
-    def _make_pair(self, symbol, exchange_name):
-        exchange = self.exchanges.get(exchange_name)
-        if not exchange:
-            return None
-        candidates = [f"{symbol}/USDT:USDT", f"{symbol}/USDT"]
-        if hasattr(exchange, "markets") and exchange.markets:
-            for c in candidates:
-                if c in exchange.markets:
-                    return c
-        return candidates[0]
-
-    def _quick_price(self, exchange, pair):
-        try:
-            t = exchange.fetch_ticker(pair)
-            if t and t.get("last"):
-                return float(t["last"])
-        except Exception:
-            pass
-        return 0
+    # ─── Regular: Current OI ─────────────────────────────────
 
     def _fetch_open_interest(self, exchange, ex_name, pair, symbol):
+        """Unified first, then exchange-specific fallback."""
+        # --- unified (works for binance / bybit / bitget / okx) ---
         try:
-            if hasattr(exchange, "fetch_open_interest"):
-                oi = exchange.fetch_open_interest(pair)
-                if oi:
-                    v = oi.get("openInterestValue") or oi.get("openInterestAmount", 0)
-                    if v and float(v) > 0:
-                        return float(v)
-        except Exception:
-            pass
+            oi = exchange.fetch_open_interest(pair)
+            if oi:
+                v = oi.get("openInterestValue") or oi.get(
+                    "openInterestAmount", 0
+                )
+                if v and float(v) > 0:
+                    return float(v)
+        except Exception as e:
+            logger.debug(f"OI unified {symbol}/{ex_name}: {e}")
+
+        # --- fallback ---
         try:
             if ex_name == "binance":
-                r = exchange.fapiPublicGetOpenInterest({"symbol": f"{symbol}USDT"})
+                r = self._call_api(
+                    exchange,
+                    [
+                        "fapiPublicGetOpenInterest",
+                        "fapiPublic_get_openInterest",
+                    ],
+                    {"symbol": f"{symbol}USDT"},
+                )
                 if r and "openInterest" in r:
                     t = exchange.fetch_ticker(pair)
                     p = t["last"] if t else 1
                     return float(r["openInterest"]) * p
+
             elif ex_name == "bybit":
-                r = exchange.publicGetV5MarketOpenInterest({
-                    "category": "linear", "symbol": f"{symbol}USDT",
-                    "intervalTime": "5min", "limit": 1,
-                })
+                r = self._call_api(
+                    exchange,
+                    [
+                        "publicGetV5MarketOpenInterest",
+                        "public_get_v5_market_open_interest",
+                    ],
+                    {
+                        "category": "linear",
+                        "symbol": f"{symbol}USDT",
+                        "intervalTime": "5min",
+                        "limit": 1,
+                    },
+                )
                 if r and r.get("result", {}).get("list"):
-                    oi = float(r["result"]["list"][0].get("openInterest", 0))
+                    oi_val = float(
+                        r["result"]["list"][0].get("openInterest", 0)
+                    )
                     t = exchange.fetch_ticker(pair)
                     p = t["last"] if t else 1
-                    return oi * p
+                    return oi_val * p
+
         except Exception as e:
             logger.info(f"OI fallback {symbol}/{ex_name}: {e}")
         return None
 
+    # ─── Regular: Current Funding ────────────────────────────
+
     def _fetch_funding_rate(self, exchange, ex_name, pair, symbol):
+        """Unified first, then exchange-specific fallback."""
         try:
-            if hasattr(exchange, "fetch_funding_rate"):
-                fr = exchange.fetch_funding_rate(pair)
-                if fr and "fundingRate" in fr:
-                    return float(fr["fundingRate"])
-        except Exception:
-            pass
+            fr = exchange.fetch_funding_rate(pair)
+            if fr and "fundingRate" in fr:
+                return float(fr["fundingRate"])
+        except Exception as e:
+            logger.debug(f"Funding unified {symbol}/{ex_name}: {e}")
+
         try:
             if ex_name == "binance":
-                r = exchange.fapiPublicGetPremiumIndex({"symbol": f"{symbol}USDT"})
+                r = self._call_api(
+                    exchange,
+                    [
+                        "fapiPublicGetPremiumIndex",
+                        "fapiPublic_get_premiumIndex",
+                    ],
+                    {"symbol": f"{symbol}USDT"},
+                )
                 if r and "lastFundingRate" in r:
                     return float(r["lastFundingRate"])
+
             elif ex_name == "bybit":
-                r = exchange.publicGetV5MarketTickers({
-                    "category": "linear", "symbol": f"{symbol}USDT",
-                })
+                r = self._call_api(
+                    exchange,
+                    [
+                        "publicGetV5MarketTickers",
+                        "public_get_v5_market_tickers",
+                    ],
+                    {"category": "linear", "symbol": f"{symbol}USDT"},
+                )
                 if r and r.get("result", {}).get("list"):
-                    return float(r["result"]["list"][0].get("fundingRate", 0))
+                    return float(
+                        r["result"]["list"][0].get("fundingRate", 0)
+                    )
+
         except Exception as e:
             logger.info(f"Funding fallback {symbol}/{ex_name}: {e}")
         return None
 
+    # ─── Regular: Current L/S ratio ──────────────────────────
+
     def _fetch_long_short_ratio(self, exchange, ex_name, pair, symbol):
         try:
             if ex_name == "binance":
-                r = exchange.fapiDataGetGlobalLongShortAccountRatio({
-                    "symbol": f"{symbol}USDT", "period": "1h", "limit": 1,
-                })
+                r = self._call_api(
+                    exchange,
+                    [
+                        "fapiDataGetGlobalLongShortAccountRatio",
+                        "fapiData_get_globalLongShortAccountRatio",
+                    ],
+                    {
+                        "symbol": f"{symbol}USDT",
+                        "period": "1h",
+                        "limit": 1,
+                    },
+                )
                 if r and len(r) > 0:
                     return float(r[0].get("longShortRatio", 1.0))
+
             elif ex_name == "bybit":
-                r = exchange.publicGetV5MarketAccountRatio({
-                    "category": "linear", "symbol": f"{symbol}USDT",
-                    "period": "1h", "limit": 1,
-                })
+                r = self._call_api(
+                    exchange,
+                    [
+                        "publicGetV5MarketAccountRatio",
+                        "public_get_v5_market_account_ratio",
+                    ],
+                    {
+                        "category": "linear",
+                        "symbol": f"{symbol}USDT",
+                        "period": "1h",
+                        "limit": 1,
+                    },
+                )
                 if r and r.get("result", {}).get("list"):
-                    buy = float(r["result"]["list"][0].get("buyRatio", 0.5))
-                    sell = float(r["result"]["list"][0].get("sellRatio", 0.5))
+                    buy = float(
+                        r["result"]["list"][0].get("buyRatio", 0.5)
+                    )
+                    sell = float(
+                        r["result"]["list"][0].get("sellRatio", 0.5)
+                    )
                     return safe_divide(buy, sell, 1.0)
+
         except Exception as e:
             logger.info(f"L/S fail {symbol}/{ex_name}: {e}")
         return None

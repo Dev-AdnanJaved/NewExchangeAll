@@ -14,6 +14,7 @@ logger = get_logger("telegram")
 try:
     from telegram import Update
     from telegram.ext import Application, CommandHandler, ContextTypes
+
     TG = True
 except ImportError:
     TG = False
@@ -28,62 +29,108 @@ class TelegramAlert:
         self._app = None
         self._loop = None
         self._thread = None
+        self._ready = threading.Event()
 
         if TG and bot_token and chat_id:
             self._start()
+            # block until the bot is actually ready (max 15 s)
+            if not self._ready.wait(timeout=15):
+                logger.warning("Telegram bot init timed out")
+
+    # ─── Lifecycle ────────────────────────────────────────────
 
     def _start(self):
         def run():
             try:
                 self._loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self._loop)
+
                 self._app = Application.builder().token(self.token).build()
 
                 cmds = [
-                    ("start", self._start_cmd), ("help", self._help),
-                    ("trade", self._trade), ("close", self._close),
-                    ("status", self._status), ("adjust", self._adjust),
-                    ("scan", self._scan), ("watchlist", self._wl),
+                    ("start", self._start_cmd),
+                    ("help", self._help),
+                    ("trade", self._trade),
+                    ("close", self._close),
+                    ("status", self._status),
+                    ("adjust", self._adjust),
+                    ("scan", self._scan),
+                    ("watchlist", self._wl),
                 ]
                 for cmd, fn in cmds:
                     self._app.add_handler(CommandHandler(cmd, fn))
 
-                logger.info("Telegram bot started")
+                # ── Manual init ──────────────────────────────
+                # Using initialize() + start() + start_polling()
+                # instead of run_polling() to avoid
+                # "set_wakeup_fd only works in main thread" error.
+                self._loop.run_until_complete(self._app.initialize())
+                self._loop.run_until_complete(self._app.start())
                 self._loop.run_until_complete(
-                    self._app.run_polling(drop_pending_updates=True)
+                    self._app.updater.start_polling(
+                        drop_pending_updates=True
+                    )
                 )
+
+                logger.info("Telegram bot started")
+                self._ready.set()
+
+                # keep the loop alive so run_coroutine_threadsafe works
+                self._loop.run_forever()
+
             except Exception as e:
                 logger.error(f"TG error: {e}")
                 logger.debug(traceback.format_exc())
+                self._ready.set()          # unblock __init__ even on failure
+
+            finally:
+                # clean up when run_forever() is stopped
+                if self._app:
+                    try:
+                        self._loop.run_until_complete(
+                            self._app.updater.stop()
+                        )
+                        self._loop.run_until_complete(self._app.stop())
+                        self._loop.run_until_complete(self._app.shutdown())
+                    except Exception:
+                        pass
+                if self._loop:
+                    self._loop.close()
 
         self._thread = threading.Thread(target=run, daemon=True)
         self._thread.start()
 
+    def stop(self):
+        """Gracefully stop the bot (call on program exit)."""
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._thread:
+                self._thread.join(timeout=10)
+
+    # ─── Sending ──────────────────────────────────────────────
+
     def _send(self, text):
-        if not TG or not self._app:
+        if not TG or not self._app or not self._loop:
             return
 
-        async def s():
+        async def _do_send():
             try:
                 msg = text
                 while msg:
                     chunk = msg[:4000]
                     msg = msg[4000:]
                     await self._app.bot.send_message(
-                        chat_id=self.chat, text=chunk, parse_mode="HTML"
+                        chat_id=self.chat,
+                        text=chunk,
+                        parse_mode="HTML",
                     )
             except Exception as e:
                 logger.error(f"TG send: {e}")
 
-        if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(s(), self._loop)
+        if self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(_do_send(), self._loop)
         else:
-            try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(s())
-                loop.close()
-            except Exception:
-                pass
+            logger.warning("TG loop not running — message dropped")
 
     # ─── Commands ─────────────────────────────────────────────
 
@@ -114,7 +161,8 @@ class TelegramAlert:
         a = c.args
         if not a or len(a) < 4:
             await u.message.reply_text(
-                "Usage: /trade TOKEN PRICE SIZE STOP%\nExample: /trade DOGE 0.165 5000 7"
+                "Usage: /trade TOKEN PRICE SIZE STOP%\n"
+                "Example: /trade DOGE 0.165 5000 7"
             )
             return
         try:
@@ -123,9 +171,11 @@ class TelegramAlert:
             if self.scanner.add_trade(sym, ep, sz, sp):
                 stop_p = ep * (1 - sp / 100)
                 await u.message.reply_text(
-                    f"✅ <b>{sym}</b> @ {format_price(ep)} | {format_usd(sz)}\n"
+                    f"✅ <b>{sym}</b> @ {format_price(ep)} | "
+                    f"{format_usd(sz)}\n"
                     f"Stop: {format_price(stop_p)} (-{sp}%) | "
-                    f"Risk: {format_usd(sz * sp / 100)}\n📡 Monitoring...",
+                    f"Risk: {format_usd(sz * sp / 100)}\n"
+                    f"📡 Monitoring...",
                     parse_mode="HTML",
                 )
             else:
@@ -146,7 +196,8 @@ class TelegramAlert:
         if r:
             em = "🟢" if r["total_pnl"] >= 0 else "🔴"
             await u.message.reply_text(
-                f"{em} <b>{r['symbol']}</b> PnL: {format_usd(r['total_pnl'])} "
+                f"{em} <b>{r['symbol']}</b> PnL: "
+                f"{format_usd(r['total_pnl'])} "
                 f"({format_pct(r['total_pnl_pct'])})",
                 parse_mode="HTML",
             )
@@ -164,7 +215,8 @@ class TelegramAlert:
         for t in trades:
             tps = sum(t.get(f"tp{i}_hit", 0) for i in range(1, 5))
             msg += (
-                f"<b>{t['symbol']}</b> @ {format_price(t['entry_price'])}\n"
+                f"<b>{t['symbol']}</b> @ "
+                f"{format_price(t['entry_price'])}\n"
                 f"  Stop: {format_price(t['current_stop_price'])} | "
                 f"{t['remaining_fraction'] * 100:.0f}% | TP:{tps}/4\n"
                 f"  Realized: {format_usd(t['realized_pnl'])}\n\n"
@@ -179,20 +231,25 @@ class TelegramAlert:
             await u.message.reply_text("Usage: /adjust TOKEN stop PRICE")
             return
         self.scanner.adjust_stop(c.args[0].upper(), float(c.args[2]))
-        await u.message.reply_text(f"✅ Stop adjusted for {c.args[0].upper()}")
+        await u.message.reply_text(
+            f"✅ Stop adjusted for {c.args[0].upper()}"
+        )
 
     async def _scan(self, u: Update, c):
         if not self.scanner:
             return
         await u.message.reply_text("🔄 Scanning...")
 
+        loop = self._loop
+
         def do():
             try:
                 results = self.scanner.run_once()
-                asyncio.run_coroutine_threadsafe(
-                    u.message.reply_text(f"✅ {len(results)} alerts"),
-                    self._loop,
-                )
+                if loop and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        u.message.reply_text(f"✅ {len(results)} alerts"),
+                        loop,
+                    )
             except Exception as e:
                 logger.error(f"Forced scan: {e}")
 
@@ -206,13 +263,18 @@ class TelegramAlert:
             await u.message.reply_text("📭 Empty. Run /scan first.")
             return
         em_map = {
-            "CRITICAL": "🔴", "HIGH_ALERT": "🟠",
-            "WATCHLIST": "🟡", "MONITOR": "⚪",
+            "CRITICAL": "🔴",
+            "HIGH_ALERT": "🟠",
+            "WATCHLIST": "🟡",
+            "MONITOR": "⚪",
         }
         msg = "📋 <b>Watchlist</b>\n\n"
         for i in top:
             em = em_map.get(i["classification"], "")
-            msg += f"{em} <b>{i['symbol']}</b>: {i['composite_score']:.0f}\n"
+            msg += (
+                f"{em} <b>{i['symbol']}</b>: "
+                f"{i['composite_score']:.0f}\n"
+            )
         await u.message.reply_text(msg, parse_mode="HTML")
 
     # ─── Notifications ────────────────────────────────────────
@@ -228,7 +290,11 @@ class TelegramAlert:
         price = r.get("current_price", 0)
         levels = r.get("levels")
 
-        em = {"CRITICAL": "🔴🔴🔴", "HIGH_ALERT": "🟠🟠", "WATCHLIST": "🟡"}.get(cl, "📊")
+        em = {
+            "CRITICAL": "🔴🔴🔴",
+            "HIGH_ALERT": "🟠🟠",
+            "WATCHLIST": "🟡",
+        }.get(cl, "📊")
 
         m = f"{em} <b>{cl}: {sym}</b> {em}\n\n"
         m += f"📊 Score: <b>{sc:.1f}</b>/100\n"
@@ -271,14 +337,23 @@ class TelegramAlert:
             q = levels["data_quality"]
 
             m += f"⚡ <b>SMART LEVELS</b> ({q['label']})\n"
-            m += f"📏 ATR: {format_price(a['value'])} ({a['pct']:.2f}%)\n\n"
+            m += (
+                f"📏 ATR: {format_price(a['value'])} "
+                f"({a['pct']:.2f}%)\n\n"
+            )
 
             m += f"📥 <b>ENTRY ({e['urgency']}):</b>\n"
-            m += f"  {format_price(e['low'])} → {format_price(e['high'])}\n"
+            m += (
+                f"  {format_price(e['low'])} → "
+                f"{format_price(e['high'])}\n"
+            )
             m += f"  Ideal: {format_price(e['ideal'])}\n\n"
 
             m += f"🛑 <b>STOP ({s['method']}):</b>\n"
-            m += f"  {format_price(s['price'])} ({format_pct(-s['pct'])})"
+            m += (
+                f"  {format_price(s['price'])} "
+                f"({format_pct(-s['pct'])})"
+            )
             m += f" | {s.get('atr_distance', 0):.1f}× ATR\n\n"
 
             if t:
@@ -286,7 +361,8 @@ class TelegramAlert:
                 for tp in t:
                     m += (
                         f"  TP{tp['level']}({tp['sell_pct']}%): "
-                        f"{format_price(tp['price'])} ({format_pct(tp['pct'])}) "
+                        f"{format_price(tp['price'])} "
+                        f"({format_pct(tp['pct'])}) "
                         f"[{tp['atr_multiple']:.1f}×ATR]\n"
                     )
                 if tr:
@@ -301,7 +377,10 @@ class TelegramAlert:
                     f"📐 <b>R:R {rr['ratio']:.2f}:1</b> | "
                     f"Risk: {rr['risk_pct']:.1f}%\n"
                 )
-                m += f"  $10k 2%→{rr.get('position_2pct_risk_10k', 'N/A')}\n\n"
+                m += (
+                    f"  $10k 2%→"
+                    f"{rr.get('position_2pct_risk_10k', 'N/A')}\n\n"
+                )
 
             m += (
                 f"<code>/trade {sym} {e.get('ideal', 0):.8g} "
@@ -320,7 +399,9 @@ class TelegramAlert:
 
     def send_event(self, e):
         em = {
-            "IGNITION": "🚀🚀🚀", "SCORE_JUMP": "📈📈", "UPGRADE": "⬆️",
+            "IGNITION": "🚀🚀🚀",
+            "SCORE_JUMP": "📈📈",
+            "UPGRADE": "⬆️",
         }.get(e.get("type", ""), "📢")
         m = f"{em} <b>{e['type']}: {e['symbol']}</b>\n\n{e['message']}"
         if e["type"] == "IGNITION":
@@ -338,16 +419,20 @@ class TelegramAlert:
             f"📡 Monitoring..."
         )
 
-    def send_stop_update(self, symbol, new_stop_price, new_stop_pct,
-                         current_price, entry_price, reason):
+    def send_stop_update(
+        self, symbol, new_stop_price, new_stop_pct,
+        current_price, entry_price, reason,
+    ):
         self._send(
             f"📍 <b>STOP {symbol}</b>\n\n"
             f"Move to: {format_price(new_stop_price)} "
             f"({format_pct(new_stop_pct)})\n{reason}"
         )
 
-    def send_tp_hit(self, symbol, tp_level, tp_pct, current_price,
-                    entry_price, pnl_chunk, remaining_pct):
+    def send_tp_hit(
+        self, symbol, tp_level, tp_pct, current_price,
+        entry_price, pnl_chunk, remaining_pct,
+    ):
         self._send(
             f"🎯 <b>TP{tp_level} {symbol}</b>\n\n"
             f"{format_price(current_price)} (+{tp_pct:.0f}%)\n"
@@ -364,23 +449,31 @@ class TelegramAlert:
             f"{r['duration_hours']:.1f}h"
         )
 
-    def send_trade_status(self, symbol, entry_price, current_price,
-                          price_change_pct, unrealized_pnl, realized_pnl,
-                          remaining_pct, current_stop, hours_in, score):
+    def send_trade_status(
+        self, symbol, entry_price, current_price,
+        price_change_pct, unrealized_pnl, realized_pnl,
+        remaining_pct, current_stop, hours_in, score,
+    ):
         em = "🟢" if price_change_pct >= 0 else "🔴"
         self._send(
             f"{em} <b>{symbol}</b> ({hours_in:.1f}h)\n\n"
-            f"{format_price(current_price)} ({format_pct(price_change_pct)})\n"
-            f"U:{format_usd(unrealized_pnl)} R:{format_usd(realized_pnl)}\n"
-            f"{remaining_pct:.0f}% | Stop:{format_price(current_stop)} | "
+            f"{format_price(current_price)} "
+            f"({format_pct(price_change_pct)})\n"
+            f"U:{format_usd(unrealized_pnl)} "
+            f"R:{format_usd(realized_pnl)}\n"
+            f"{remaining_pct:.0f}% | "
+            f"Stop:{format_price(current_stop)} | "
             f"Score:{score:.0f}"
         )
 
-    def send_signal_degradation(self, symbol, old_score, new_score,
-                                current_price, entry_price, price_change_pct):
+    def send_signal_degradation(
+        self, symbol, old_score, new_score,
+        current_price, entry_price, price_change_pct,
+    ):
         self._send(
             f"⚠️ <b>DEGRADE {symbol}</b>\n\n"
             f"{old_score:.0f}→{new_score:.0f}\n"
-            f"{format_price(current_price)} ({format_pct(price_change_pct)})\n\n"
+            f"{format_price(current_price)} "
+            f"({format_pct(price_change_pct)})\n\n"
             f"<b>Tighten stop or exit 50%</b>"
         )
